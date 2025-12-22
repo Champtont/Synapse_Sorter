@@ -3,13 +3,22 @@ import re
 import threading
 import tempfile
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import PhotoImage, filedialog, messagebox
 import ttkbootstrap as tb 
 from ttkbootstrap.constants import *
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx2python import docx2python
+import sys
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # ----------------------------
 # Utilities
@@ -111,43 +120,51 @@ def process_document(file_path):
 class SynapseSorterApp:
     def __init__(self, root):
         self.root = root
+        icon_file = resource_path("icon.ico")  # Make sure icon.ico exists
+        if os.path.exists(icon_file):
+            try:
+                self.root.iconbitmap(icon_file)  # Windows
+            except tk.TclError:
+                pass
+        else:
+            # Cross-platform fallback using .png
+            try:
+                photo = PhotoImage(file=resource_path("icon.png"))
+                self.root.tk.call('wm', 'iconphoto', self.root._w, photo)
+            except Exception as e:
+                print("Failed to load icon:", e)
+            print("Icon file not found at", icon_file)
+
         self.root.title("Synapse Sorter")
         self.root.geometry("550x650")
         self.questions, self.image_dict = None, None
 
-        try:
-            self.root.iconbitmap("icon.ico")
-        except:
-            pass
-            
-        self.questions, self.image_dict = None, None
-        
         self.frame = tb.Frame(self.root, padding=30)
         self.frame.pack(fill="both", expand=True)
-        
+
         tb.Label(self.frame, text="SYNAPSE SORTER", font=("Helvetica", 20, "bold"), bootstyle="primary").pack(pady=(0, 25))
-        
+
         tb.Label(self.frame, text="Exam Title:", font=("Helvetica", 10, "bold")).pack(anchor="w")
         self.title_ent = tb.Entry(self.frame, bootstyle="primary")
         self.title_ent.insert(0, "Immunology Assessment")
         self.title_ent.pack(fill="x", pady=(5, 20))
-        
+
         self.load_btn = tb.Button(self.frame, text="LOAD QUESTION BANK", command=self.load_file, bootstyle="outline-primary")
         self.load_btn.pack(fill="x", pady=5)
         self.status = tb.Label(self.frame, text="No file selected", font=("Helvetica", 9), bootstyle="secondary")
         self.status.pack(pady=(0, 20))
-        
+
         tb.Label(self.frame, text="Select Question Numbers:", font=("Helvetica", 10, "bold")).pack(anchor="w")
         tb.Label(self.frame, text="Example: 1-5, 8, 20-26", font=("Helvetica", 8), bootstyle="secondary").pack(anchor="w")
         self.range_ent = tb.Entry(self.frame, bootstyle="primary")
         self.range_ent.pack(fill="x", pady=5)
-        
+
         self.progress = tb.Progressbar(self.frame, bootstyle="primary-striped", value=0)
         self.progress.pack(fill="x", pady=20)
-        
+
         self.gen_btn = tb.Button(self.frame, text="GENERATE CLEAN EXAM", command=self.generate, bootstyle="primary")
         self.gen_btn.pack(fill="x", pady=10)
-        
+
         tb.Button(self.frame, text="HELP / INSTRUCTIONS", command=self.show_help, bootstyle="link").pack(pady=5)
         tb.Label(self.frame, text="Developed for Tamara", font=("Helvetica", 8, "italic"), bootstyle="secondary").pack(side="bottom", pady=10)
 
