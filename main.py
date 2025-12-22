@@ -3,26 +3,19 @@ import re
 import threading
 import tempfile
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-
+from tkinter import filedialog, messagebox
+import ttkbootstrap as tb 
+from ttkbootstrap.constants import *
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx2python import docx2python
-
-# Attempt to load Drag and Drop support if available
-try:
-    from tkinterdnd2 import TkinterDnD, DND_FILES
-    DND_AVAILABLE = True
-except ImportError:
-    DND_AVAILABLE = False
 
 # ----------------------------
 # Utilities
 # ----------------------------
 
 def parse_number_input(text):
-    """Parses input like '1, 5-10, 20' into a sorted list of integers."""
     numbers = set()
     for part in text.split(","):
         part = part.strip()
@@ -38,10 +31,6 @@ def parse_number_input(text):
     return sorted(numbers)
 
 def normalize_answer_text(text):
-    """
-    Standardizes answer letters to 'A. Text' format.
-    Fixes 'A)', 'a.', and inconsistent spacing [cite: 59-63, 165-169].
-    """
     match = re.match(r'^([A-Ea-e])[\.\)]\s*(.*)', text)
     if match:
         letter = match.group(1).upper()
@@ -54,27 +43,23 @@ def normalize_answer_text(text):
 # ----------------------------
 
 def process_document(file_path):
-    """Extracts questions, bilingual text, and images from the source doc, preserving images."""
     with docx2python(file_path) as doc:
         text = doc.text
         images = doc.images 
 
-    # Map images to their filenames for consistent lookup
     image_lookup = {os.path.basename(k): v for k, v in images.items()}
 
     questions = {}
     current_q = None
     
-    # Matches '1. (optional metadata) text' and removes metadata like (mid25) or (Final25)
+    # EXACT REGEX FROM YOUR WORKING VERSION
     q_pattern = re.compile(r'^(\d+)\.?\s*(?:\([^\)]*\))?\s*(.*)')
     ans_pattern = re.compile(r'^([A-Ea-e])[\.\)]')
 
     for line in text.splitlines():
         line = line.strip()
-        if not line: 
-            continue
+        if not line: continue
 
-        # Detect new question number
         q_match = q_pattern.match(line)
         if q_match:
             current_q = int(q_match.group(1))
@@ -86,7 +71,6 @@ def process_document(file_path):
             continue
 
         if current_q is not None:
-            # Step 1: Check for image placeholders (unchanged)
             img_match = re.search(r'----(.*?image\d+\.\w+)----', line)
             if img_match:
                 img_filename = os.path.basename(img_match.group(1))
@@ -96,12 +80,10 @@ def process_document(file_path):
                 })
                 continue
 
-            # Step 2: Skip trash/placeholder text
             trash_patterns = ["Image alt text", "AI-generated content", "----image"]
             if any(p in line for p in trash_patterns):
                 continue
 
-            # Step 3: Decide if line is part of Header or Answer
             if ans_pattern.match(line):
                 questions[current_q]["found_first_answer"] = True
                 questions[current_q]["elements"].append({
@@ -109,16 +91,13 @@ def process_document(file_path):
                     "content": line
                 })
             elif not questions[current_q]["found_first_answer"]:
-                # Lines before first answer are part of the header
                 questions[current_q]["header_parts"].append(line)
             else:
-                # Lines after first answer
                 questions[current_q]["elements"].append({
                     "type": "text",
                     "content": line
                 })
 
-    # Combine multi-line headers and remove empty/placeholder strings
     for q_id in questions:
         clean_parts = [p.strip() for p in questions[q_id]["header_parts"] if p.strip() and p != "?"]
         questions[q_id]["header"] = " ".join(clean_parts) if clean_parts else "Question Text Missing"
@@ -126,148 +105,112 @@ def process_document(file_path):
     return questions, image_lookup
 
 # ----------------------------
-# Document Creation
-# ----------------------------
-
-def create_new_test(output_path, title, selected_nums, questions, image_dict, progress_cb):
-    """Builds the final Word document with the requested formatting."""
-    doc = Document()
-
-    # Apply Global Font Settings
-    style = doc.styles['Normal']
-    style.font.name = 'Times New Roman'
-    style.font.size = Pt(11)
-
-    # Center-aligned Title
-    title_p = doc.add_heading(title, level=0)
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    with tempfile.TemporaryDirectory() as tmp:
-        new_num = 1
-        for old_num in selected_nums:
-            if old_num not in questions:
-                progress_cb()
-                continue
-
-            q = questions[old_num]
-            
-            # Question Header (Bold)
-            header_p = doc.add_paragraph()
-            header_p.paragraph_format.space_before = Pt(12)
-            header_p.paragraph_format.keep_with_next = True
-            run = header_p.add_run(f"{new_num}. {q['header']}")
-            run.bold = True
-
-            for elem in q["elements"]:
-                if elem["type"] == "text":
-                    # Normalize answer choices (A. Text) [cite: 59-63]
-                    formatted = normalize_answer_text(elem["content"])
-                    p = doc.add_paragraph(formatted)
-                    p.paragraph_format.left_indent = Inches(0.3)
-                    p.paragraph_format.space_after = Pt(2)
-                    p.paragraph_format.keep_with_next = True 
-                
-                elif elem["type"] == "image":
-                    img_name = elem["name"]
-                    if img_name in image_dict:
-                        img_path = os.path.join(tmp, img_name)
-                        with open(img_path, "wb") as f:
-                            f.write(image_dict[img_name])
-                        
-                        img_p = doc.add_paragraph()
-                        img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = img_p.add_run()
-                        run.add_picture(img_path, width=Inches(2.5))
-                        img_p.paragraph_format.space_before = Pt(6)
-                        img_p.paragraph_format.space_after = Pt(6)
-
-            # Add spacing between questions
-            doc.add_paragraph().paragraph_format.space_after = Pt(6)
-            new_num += 1
-            progress_cb()
-
-    doc.save(output_path)
-
-# ----------------------------
-# UI Logic (Synapse Sorter App)
+# UI Class
 # ----------------------------
 
 class SynapseSorterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Synapse Sorter")
-        self.root.geometry("550x500")
-        self.questions = None
-        self.image_dict = None
-        self.build_ui()
+        self.root.geometry("550x650")
+        self.questions, self.image_dict = None, None
 
-    def build_ui(self):
-        main_frame = ttk.Frame(self.root, padding=25)
-        main_frame.pack(fill="both", expand=True)
-
-        ttk.Label(main_frame, text="Synapse Sorter", font=("Segoe UI", 18, "bold")).pack(pady=(0, 20))
-
-        ttk.Label(main_frame, text="1. Enter Exam Title:").pack(anchor="w")
-        self.title_entry = ttk.Entry(main_frame)
-        self.title_entry.insert(0, "Immunology Assessment")
-        self.title_entry.pack(fill="x", pady=(0, 15))
-
-        self.load_btn = ttk.Button(main_frame, text="2. Load Question Bank (.docx)", command=self.load_file)
+        try:
+            self.root.iconbitmap("icon.ico")
+        except:
+            pass
+            
+        self.questions, self.image_dict = None, None
+        
+        self.frame = tb.Frame(self.root, padding=30)
+        self.frame.pack(fill="both", expand=True)
+        
+        tb.Label(self.frame, text="SYNAPSE SORTER", font=("Helvetica", 20, "bold"), bootstyle="primary").pack(pady=(0, 25))
+        
+        tb.Label(self.frame, text="Exam Title:", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        self.title_ent = tb.Entry(self.frame, bootstyle="primary")
+        self.title_ent.insert(0, "Immunology Assessment")
+        self.title_ent.pack(fill="x", pady=(5, 20))
+        
+        self.load_btn = tb.Button(self.frame, text="LOAD QUESTION BANK", command=self.load_file, bootstyle="outline-primary")
         self.load_btn.pack(fill="x", pady=5)
-
-        self.status = ttk.Label(main_frame, text="Status: Waiting for file...", foreground="gray")
-        self.status.pack(pady=(0, 15))
-
-        ttk.Label(main_frame, text="3. Question Numbers (e.g. 1-5, 8, 20-26):").pack(anchor="w")
-        self.range_entry = ttk.Entry(main_frame)
-        self.range_entry.pack(fill="x", pady=(0, 15))
-
-        self.progress = ttk.Progressbar(main_frame, mode="determinate")
-        self.progress.pack(fill="x", pady=10)
-
-        self.gen_btn = ttk.Button(main_frame, text="4. Generate Clean Exam", command=self.generate)
+        self.status = tb.Label(self.frame, text="No file selected", font=("Helvetica", 9), bootstyle="secondary")
+        self.status.pack(pady=(0, 20))
+        
+        tb.Label(self.frame, text="Select Question Numbers:", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        tb.Label(self.frame, text="Example: 1-5, 8, 20-26", font=("Helvetica", 8), bootstyle="secondary").pack(anchor="w")
+        self.range_ent = tb.Entry(self.frame, bootstyle="primary")
+        self.range_ent.pack(fill="x", pady=5)
+        
+        self.progress = tb.Progressbar(self.frame, bootstyle="primary-striped", value=0)
+        self.progress.pack(fill="x", pady=20)
+        
+        self.gen_btn = tb.Button(self.frame, text="GENERATE CLEAN EXAM", command=self.generate, bootstyle="primary")
         self.gen_btn.pack(fill="x", pady=10)
+        
+        tb.Button(self.frame, text="HELP / INSTRUCTIONS", command=self.show_help, bootstyle="link").pack(pady=5)
+        tb.Label(self.frame, text="Developed for Tamara", font=("Helvetica", 8, "italic"), bootstyle="secondary").pack(side="bottom", pady=10)
+
+    def show_help(self):
+        help_msg = (
+            "1. Enter an Exam Title.\n"
+            "2. Click LOAD to select your source Word document.\n"
+            "3. Enter the question numbers you want (e.g., 1-10, 15).\n"
+            "4. Click GENERATE to save your new formatted exam.\n\n"
+            "Bilingual text and images are restored automatically."
+        )
+        messagebox.showinfo("Synapse Sorter Help", help_msg)
 
     def load_file(self):
         path = filedialog.askopenfilename(filetypes=[("Word Documents", "*.docx")])
         if path:
-            try:
-                self.questions, self.image_dict = process_document(path)
-                self.status.config(text=f"Status: {len(self.questions)} questions loaded.", foreground="green")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load document: {e}")
+            self.questions, self.image_dict = process_document(path)
+            self.status.config(text=f"Loaded {len(self.questions)} questions", bootstyle="success")
 
     def generate(self):
-        if not self.questions:
-            messagebox.showwarning("Synapse Sorter", "Please load a source file first.")
-            return
-        
-        try:
-            nums = parse_number_input(self.range_entry.get())
-            if not nums: raise ValueError
-        except:
-            messagebox.showerror("Error", "Invalid range format (Example: 1-5, 8).")
-            return
-
-        save_path = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word", "*.docx")])
+        if not self.questions: return
+        nums = parse_number_input(self.range_ent.get())
+        save_path = filedialog.asksaveasfilename(defaultextension=".docx")
         if save_path:
             self.progress["maximum"] = len(nums)
             self.progress["value"] = 0
-            threading.Thread(target=self.run_task, args=(save_path, self.title_entry.get(), nums), daemon=True).start()
+            threading.Thread(target=self.run_task, args=(save_path, self.title_ent.get(), nums), daemon=True).start()
 
     def run_task(self, path, title, nums):
-        def update_progress():
-            self.progress["value"] += 1
-            self.root.update_idletasks()
+        doc = Document()
+        style = doc.styles['Normal']
+        style.font.name = 'Times New Roman'
+        style.font.size = Pt(11)
         
-        try:
-            create_new_test(path, title, nums, self.questions, self.image_dict, update_progress)
-            messagebox.showinfo("Success", "Exam generated with consistent formatting and images!")
-        except Exception as e:
-            messagebox.showerror("Error", f"An error occurred during generation: {e}")
+        title_p = doc.add_heading(title, level=0)
+        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        with tempfile.TemporaryDirectory() as tmp:
+            new_num = 1
+            for n in nums:
+                if n in self.questions:
+                    q = self.questions[n]
+                    header_p = doc.add_paragraph()
+                    header_p.paragraph_format.space_before = Pt(12)
+                    header_p.add_run(f"{new_num}. {q['header']}").bold = True
+                    for e in q["elements"]:
+                        if e["type"] == "text":
+                            ans = doc.add_paragraph(normalize_answer_text(e["content"]))
+                            ans.paragraph_format.left_indent = Inches(0.3)
+                        elif e["type"] == "image":
+                            img_name = e["name"]
+                            if img_name in self.image_dict:
+                                img_path = os.path.join(tmp, img_name)
+                                with open(img_path, "wb") as f: f.write(self.image_dict[img_name])
+                                img_p = doc.add_paragraph()
+                                img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                img_p.add_run().add_picture(img_path, width=Inches(2.5))
+                    new_num += 1
+                self.progress.step(1)
+        doc.save(path)
+        messagebox.showinfo("Success", "Exam Generated!")
 
 if __name__ == "__main__":
-    # Launch with Drag and Drop support if library is present
-    root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
-    app = SynapseSorterApp(root)
-    root.mainloop()
+    root_win = tb.Window(themename="flatly")
+    app = SynapseSorterApp(root_win)
+    root_win.mainloop()
