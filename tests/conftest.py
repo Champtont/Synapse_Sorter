@@ -6,6 +6,8 @@ from pathlib import Path
 import openpyxl
 import pytest
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
+from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, RGBColor
@@ -105,6 +107,49 @@ def bank_path(tmp_path):
     doc.add_picture(_png_file(tmp_path, "unused.png", (0, 0, 255)), width=Inches(1))
 
     path = tmp_path / "bank.docx"
+    doc.save(path)
+    return path
+
+
+@pytest.fixture
+def header_path(tmp_path):
+    """An exam header shaped like Tamara's.
+
+    - right-aligned yellow 'Permuta<tab>1' (the version spot)
+    - yellow 'Midterm' followed by plain ' Exam'
+    - yellow date followed by a tab and 'Name:'
+    - a paragraph in a custom style the question bank does not have
+    - an auto-lettered list, and a logo image
+    """
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run().add_tab()
+    p.add_run("Permuta").font.highlight_color = WD_COLOR_INDEX.YELLOW
+    run = p.add_run()
+    run.add_tab()
+    run.add_text("1")
+    run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+    p = doc.add_paragraph()
+    p.add_run("Midterm").font.highlight_color = WD_COLOR_INDEX.YELLOW
+    p.add_run(" Exam")
+    doc.add_paragraph("Immunology for Biotechnologists")
+
+    p = doc.add_paragraph()
+    p.add_run("01/12/2025").font.highlight_color = WD_COLOR_INDEX.YELLOW
+    run = p.add_run()
+    run.add_tab()
+    run.add_text("Name:")
+
+    doc.styles.add_style("x_x_msonormal", WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph("One point per question.", style="x_x_msonormal")
+    rules = add_lettered_list(doc)
+    add_answer(doc, "No phones", rules)
+    add_answer(doc, "No notes", rules)
+    doc.add_picture(_png_file(tmp_path, "logo.png", (200, 0, 0)), width=Inches(1))
+    doc.add_paragraph("Signature:")
+
+    path = tmp_path / "header.docx"
     doc.save(path)
     return path
 

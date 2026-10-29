@@ -8,19 +8,31 @@ Synapse Sorter is a Python desktop application that allows you to select questio
 - Select specific questions by number or range (e.g., `20-26, 3, 8`), in the order you want them
 - Or load an Excel file with several exam versions (permutations) and generate them all at once
 - Keeps the source formatting: fonts, italics, colours, auto-lettered answers and images
+- Puts your own exam header (from a Word document) at the top of every exam, with boxes to fill in its yellow parts
+- Never splits a question across two pages
 - Section titles marked with `*` are never copied
 - Optionally removes the red answer marking for a student copy
-- Simple, user-friendly graphical interface
+- Simple step-by-step window
 
 ## How to Use
-1. **Open Synapse Sorter**
-2. Enter your desired exam title in the "Exam Title" field
-3. Click **LOAD QUESTION BANK** and select your source Word document (.docx)
-4. Then either:
-   - **Option 1:** enter the question numbers you want (e.g., `20-26, 3, 8`) and click **GENERATE CLEAN EXAM**, or
-   - **Option 2:** click **LOAD PERMUTATIONS EXCEL**, select your Excel file, click **GENERATE ALL PERMUTATIONS** and choose a folder. One exam is created per column, named `<Exam Title> - <column name>.docx`
-5. Tick **Remove red answer marking** if the exam is for students
-6. The app notifies you when the exams are ready, and lists any numbers it could not find
+Open Synapse Sorter and work through the four steps:
+
+1. **Question bank:** click **Choose question bank…** and select your source Word document (.docx)
+2. **Exam header:** click **Choose exam header…** and select the Word document with the text for the top of the exam (see below). Fill in the boxes that appear. The app remembers the header and your entries for next time
+3. **Questions:** pick a tab:
+   - **Permutations from Excel:** click **Choose Excel file…**. One exam is created per column
+   - **Type numbers:** enter the question numbers you want (e.g., `20-26, 3, 8`) for a single exam
+4. **Create exams:** enter the file name, turn on **Student copy** to remove the red answer marking if needed, and click **Create exams**. Permutations are saved in a folder you choose as `<File name> - <column name>.docx`
+
+The app notifies you when the exams are ready, and lists any numbers it could not find.
+
+## Exam Header
+- Any Word document can be the header: everything in it is copied to the top of every exam, with its formatting
+- **In Word, highlight in yellow the parts that change from exam to exam** (e.g. `Midterm`, the date). Only yellow text gets a box in the app; anything else is copied exactly as it is. The app warns you if the header has no yellow text
+- Yellow text containing **Permuta** (e.g. `Permuta 1`) is filled in automatically with the Excel column name: `Permuta_3` becomes `Permuta 3`. It stays empty for **Type numbers** exams
+- The yellow highlighting is removed in the generated exams
+- If you edit the header in Word after choosing it, choose it again before creating exams (the app will remind you)
+- Creating exams without a header asks for confirmation first; the file name is then used as the exam title
 
 ## Permutations Excel Format
 - Only the first sheet is read
@@ -43,6 +55,7 @@ Synapse Sorter is a Python desktop application that allows you to select questio
 ## Notes
 - Questions are renumbered from 1 in the order you selected them
 - Each question's answer list restarts at `a.`
+- Each question is kept on one page using Word's "Keep with next" and "Keep lines together" settings, so this still works if you edit the exam afterwards. Only a question longer than a full page will break
 - The output is a .docx file compatible with Microsoft Word
 
 ## Troubleshooting
@@ -74,11 +87,13 @@ Run the tests (no Word needed; test documents are created on the fly):
 .venv\Scripts\python -m pytest
 ```
 
-To also test against the real question bank and permutations Excel, point the tests at them:
+To also test against the real question bank, permutations Excel and exam header, point the tests at them:
 
 ```bash
-set SYNAPSE_POOL=C:\path\to\Question_pool_auto.docx && set SYNAPSE_PERMUTAS=C:\path\to\Examen_Midterm_Permutas.xlsx && .venv\Scripts\python -m pytest
+set SYNAPSE_POOL=C:\path\to\Question_pool_auto.docx && set SYNAPSE_PERMUTAS=C:\path\to\Examen_Midterm_Permutas.xlsx && set "SYNAPSE_HEADER=C:\path\to\Exam header.docx" && .venv\Scripts\python -m pytest
 ```
+
+The app remembers the last header and its field values in `%APPDATA%\SynapseSorter\settings.json`.
 
 Build the Windows executable (written to `dist\SynapseSorter.exe`):
 
@@ -87,7 +102,7 @@ Build the Windows executable (written to `dist\SynapseSorter.exe`):
 ```
 
 The code is split so it can be tested without opening the window:
-- `synapse_core.py`: reading the question bank and Excel, building exams
+- `synapse_core.py`: reading the question bank, header and Excel, building exams
 - `main.py`: the window
 - `tests/`: automated tests
 

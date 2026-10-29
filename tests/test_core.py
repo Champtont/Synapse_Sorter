@@ -6,7 +6,7 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 
-from synapse_core import (QuestionBank, build_exam, describe_report, parse_number_input,
+from synapse_core import (ExamHeader, HeaderChangedError, QuestionBank, build_exam, describe_report, parse_number_input,
                           read_permutations, safe_filename)
 
 
@@ -187,6 +187,101 @@ def test_progress_called_per_number(bank_path, tmp_path):
     assert steps == [1, 2, 3]
 
 
+def test_questions_are_never_split_across_pages(bank_path, tmp_path):
+    doc, _ = build(bank_path, tmp_path, [2, 1])
+    ps = doc.paragraphs
+    start = next(i for i, p in enumerate(ps) if p.text.startswith("1. Second"))
+    q2 = ps[start:start + 4]          # stem, image, two answers
+    separator = ps[start + 4]
+    assert [p.paragraph_format.keep_with_next for p in q2] == [True, True, True, None]
+    assert all(p.paragraph_format.keep_together for p in q2)
+    assert separator.text == "" and separator.paragraph_format.keep_with_next is None
+
+
+# ----------------------------
+# Exam header
+# ----------------------------
+
+def build_with_header(bank_path, header_path, tmp_path, values=None, version="Permuta_3", numbers=(1,)):
+    bank = QuestionBank(str(bank_path))
+    out = tmp_path / "exam.docx"
+    build_exam(bank, list(numbers), "File Name", str(out),
+               header=ExamHeader(str(header_path)), header_values=values or {}, version=version)
+    return Document(str(out))
+
+
+def test_header_finds_yellow_fields(header_path):
+    header = ExamHeader(str(header_path))
+    assert header.fields == [{"text": "Permuta\t1", "version": True},
+                             {"text": "Midterm", "version": False},
+                             {"text": "01/12/2025", "version": False}]
+    assert header.inputs == [(1, "Midterm"), (2, "01/12/2025")]
+    assert header.has_version
+
+
+def test_header_replaces_title_and_fills_fields(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path, values={1: "Final", 2: "15/01/2026"})
+    t = [p.text for p in doc.paragraphs]
+    assert t[:4] == ["\tPermuta\t3", "Final Exam", "Immunology for Biotechnologists", "15/01/2026\tName:"]
+    assert "File Name" not in t
+    assert not any(p.style.name == "Title" for p in doc.paragraphs)
+    assert "1. First question / Primera pregunta" in t
+
+
+def test_header_fields_left_out_keep_their_text(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path, values={2: "15/01/2026"})
+    assert doc.paragraphs[1].text == "Midterm Exam"
+
+
+def test_header_highlight_is_removed(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path)
+    assert not list(doc.element.body.iter(qn('w:highlight')))
+
+
+def test_header_version_without_number(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path, version="Version_A")
+    assert doc.paragraphs[0].text == "\tVersion A"
+
+
+def test_header_without_version_leaves_spot_empty(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path, version="")
+    assert doc.paragraphs[0].text == "\t"
+
+
+def test_header_styles_lists_and_images_carry_over(bank_path, header_path, tmp_path):
+    doc = build_with_header(bank_path, header_path, tmp_path, numbers=(2,))
+    rules = next(p for p in doc.paragraphs if p.text == "One point per question.")
+    assert rules.style.name == "x_x_msonormal"
+
+    numbering = doc.part.numbering_part.element
+    rule_num = num_ids(doc, "No phones")[0]
+    abstract = numbering.num_having_numId(rule_num).abstractNumId.val
+    assert numbering.xpath(f'./w:abstractNum[@w:abstractNumId="{abstract}"]/w:lvl/w:numFmt/@w:val') == ["lowerLetter"]
+    assert rule_num not in num_ids(doc, "Second right")
+
+    blips = {e.get(qn('r:embed')) for e in doc.element.body.iter(qn('a:blip'))}
+    images = {r.rId for r in doc.part.rels.values() if r.reltype == RT.IMAGE}
+    assert len(blips) == 2 and blips == images   # logo + question image, nothing unused
+
+
+def test_header_edited_after_loading_is_refused(bank_path, header_path, tmp_path):
+    header = ExamHeader(str(header_path))
+    doc = Document(str(header_path))
+    doc.paragraphs[1].runs[0].text = "Final"      # the yellow 'Midterm'
+    doc.save(str(header_path))
+    with pytest.raises(HeaderChangedError, match="Load the exam header again"):
+        build_exam(QuestionBank(str(bank_path)), [1], "T", str(tmp_path / "e.docx"), header=header)
+
+
+def test_header_without_permuta(tmp_path):
+    doc = Document()
+    doc.add_paragraph().add_run("Midterm").font.highlight_color = 7  # yellow
+    path = tmp_path / "plain.docx"
+    doc.save(path)
+    header = ExamHeader(str(path))
+    assert not header.has_version and header.inputs == [(0, "Midterm")]
+
+
 def test_safe_filename():
     assert safe_filename('Exam: 1/2 "final"?') == "Exam_ 1_2 _final_"
     assert safe_filename("...") == "Exam"
@@ -198,6 +293,20 @@ def test_safe_filename():
 
 POOL = os.environ.get("SYNAPSE_POOL")
 PERMUTAS = os.environ.get("SYNAPSE_PERMUTAS")
+HEADER = os.environ.get("SYNAPSE_HEADER")
+
+
+@pytest.mark.skipif(not (POOL and PERMUTAS and HEADER), reason="set SYNAPSE_POOL, SYNAPSE_PERMUTAS and SYNAPSE_HEADER to run against the real files")
+def test_real_header(tmp_path):
+    bank, header = QuestionBank(POOL), ExamHeader(HEADER)
+    assert header.has_version and header.inputs
+    for name, numbers in read_permutations(PERMUTAS):
+        out = tmp_path / f"{name}.docx"
+        build_exam(bank, numbers, name, str(out), header=header, version=name)
+        doc = Document(str(out))
+        assert name.split("_")[-1] in doc.paragraphs[0].text
+        assert not list(doc.element.body.iter(qn('w:highlight')))
+        assert len(question_lines(doc)) == len(numbers)
 
 
 @pytest.mark.skipif(not (POOL and PERMUTAS), reason="set SYNAPSE_POOL and SYNAPSE_PERMUTAS to run against the real files")
