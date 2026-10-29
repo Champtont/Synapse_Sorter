@@ -1,16 +1,14 @@
 import os
-import re
+import queue
+import sys
 import threading
-import tempfile
 import tkinter as tk
 from tkinter import PhotoImage, filedialog, messagebox
-import ttkbootstrap as tb 
+import ttkbootstrap as tb
 from ttkbootstrap.constants import *
-from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx2python import docx2python
-import sys
+
+from synapse_core import (QuestionBank, build_exam, describe_report, parse_number_input,
+                          read_permutations, safe_filename)
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -19,99 +17,6 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
-
-# ----------------------------
-# Utilities
-# ----------------------------
-
-def parse_number_input(text):
-    numbers = set()
-    for part in text.split(","):
-        part = part.strip()
-        if not part: continue
-        if "-" in part:
-            try:
-                start, end = part.split("-")
-                numbers.update(range(int(start), int(end) + 1))
-            except ValueError: continue
-        else:
-            try: numbers.add(int(part))
-            except ValueError: continue
-    return sorted(numbers)
-
-def normalize_answer_text(text):
-    match = re.match(r'^([A-Ea-e])[\.\)]\s*(.*)', text)
-    if match:
-        letter = match.group(1).upper()
-        content = match.group(2).strip()
-        return f"{letter}. {content}"
-    return text.strip()
-
-# ----------------------------
-# Document Processing
-# ----------------------------
-
-def process_document(file_path):
-    with docx2python(file_path) as doc:
-        text = doc.text
-        images = doc.images 
-
-    image_lookup = {os.path.basename(k): v for k, v in images.items()}
-
-    questions = {}
-    current_q = None
-    
-    # EXACT REGEX FROM YOUR WORKING VERSION
-    q_pattern = re.compile(r'^(\d+)\.?\s*(?:\([^\)]*\))?\s*(.*)')
-    ans_pattern = re.compile(r'^([A-Ea-e])[\.\)]')
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line: continue
-
-        q_match = q_pattern.match(line)
-        if q_match:
-            current_q = int(q_match.group(1))
-            questions[current_q] = {
-                "header_parts": [q_match.group(2).strip()],
-                "elements": [],
-                "found_first_answer": False
-            }
-            continue
-
-        if current_q is not None:
-            img_match = re.search(r'----(.*?image\d+\.\w+)----', line)
-            if img_match:
-                img_filename = os.path.basename(img_match.group(1))
-                questions[current_q]["elements"].append({
-                    "type": "image",
-                    "name": img_filename
-                })
-                continue
-
-            trash_patterns = ["Image alt text", "AI-generated content", "----image"]
-            if any(p in line for p in trash_patterns):
-                continue
-
-            if ans_pattern.match(line):
-                questions[current_q]["found_first_answer"] = True
-                questions[current_q]["elements"].append({
-                    "type": "text",
-                    "content": line
-                })
-            elif not questions[current_q]["found_first_answer"]:
-                questions[current_q]["header_parts"].append(line)
-            else:
-                questions[current_q]["elements"].append({
-                    "type": "text",
-                    "content": line
-                })
-
-    for q_id in questions:
-        clean_parts = [p.strip() for p in questions[q_id]["header_parts"] if p.strip() and p != "?"]
-        questions[q_id]["header"] = " ".join(clean_parts) if clean_parts else "Question Text Missing"
-
-    return questions, image_lookup
 
 # ----------------------------
 # UI Class
@@ -136,8 +41,10 @@ class SynapseSorterApp:
             print("Icon file not found at", icon_file)
 
         self.root.title("Synapse Sorter")
-        self.root.geometry("550x650")
-        self.questions, self.image_dict = None, None
+        self.root.geometry("550x800")
+        self.bank, self.permutations = None, None
+        # The worker thread never touches widgets; it posts messages here instead
+        self.events = queue.Queue()
 
         self.frame = tb.Frame(self.root, padding=30)
         self.frame.pack(fill="both", expand=True)
@@ -154,78 +61,154 @@ class SynapseSorterApp:
         self.status = tb.Label(self.frame, text="No file selected", font=("Helvetica", 9), bootstyle="secondary")
         self.status.pack(pady=(0, 20))
 
-        tb.Label(self.frame, text="Select Question Numbers:", font=("Helvetica", 10, "bold")).pack(anchor="w")
-        tb.Label(self.frame, text="Example: 1-5, 8, 20-26", font=("Helvetica", 8), bootstyle="secondary").pack(anchor="w")
+        tb.Label(self.frame, text="Option 1 - Type Question Numbers:", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        tb.Label(self.frame, text="Questions appear in the order typed. Example: 20-26, 3, 8", font=("Helvetica", 8), bootstyle="secondary").pack(anchor="w")
         self.range_ent = tb.Entry(self.frame, bootstyle="primary")
         self.range_ent.pack(fill="x", pady=5)
+        self.gen_btn = tb.Button(self.frame, text="GENERATE CLEAN EXAM", command=self.generate, bootstyle="primary")
+        self.gen_btn.pack(fill="x", pady=(5, 20))
+
+        tb.Label(self.frame, text="Option 2 - Permutations From Excel:", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        tb.Label(self.frame, text="One column per version, version name in row 1", font=("Helvetica", 8), bootstyle="secondary").pack(anchor="w")
+        self.excel_btn = tb.Button(self.frame, text="LOAD PERMUTATIONS EXCEL", command=self.load_excel, bootstyle="outline-primary")
+        self.excel_btn.pack(fill="x", pady=5)
+        self.excel_status = tb.Label(self.frame, text="No Excel selected", font=("Helvetica", 9), bootstyle="secondary")
+        self.excel_status.pack()
+        self.perm_btn = tb.Button(self.frame, text="GENERATE ALL PERMUTATIONS", command=self.generate_permutations, bootstyle="primary")
+        self.perm_btn.pack(fill="x", pady=(5, 20))
+
+        self.hide_answers = tk.BooleanVar(value=False)
+        tb.Checkbutton(self.frame, text="Remove red answer marking (student copy)", variable=self.hide_answers, bootstyle="primary").pack(anchor="w")
 
         self.progress = tb.Progressbar(self.frame, bootstyle="primary-striped", value=0)
         self.progress.pack(fill="x", pady=20)
 
-        self.gen_btn = tb.Button(self.frame, text="GENERATE CLEAN EXAM", command=self.generate, bootstyle="primary")
-        self.gen_btn.pack(fill="x", pady=10)
-
         tb.Button(self.frame, text="HELP / INSTRUCTIONS", command=self.show_help, bootstyle="link").pack(pady=5)
         tb.Label(self.frame, text="Developed for Tamara", font=("Helvetica", 8, "italic"), bootstyle="secondary").pack(side="bottom", pady=10)
+
+        self.buttons = [self.load_btn, self.gen_btn, self.excel_btn, self.perm_btn]
 
     def show_help(self):
         help_msg = (
             "1. Enter an Exam Title.\n"
             "2. Click LOAD to select your source Word document.\n"
-            "3. Enter the question numbers you want (e.g., 1-10, 15).\n"
-            "4. Click GENERATE to save your new formatted exam.\n\n"
-            "Bilingual text and images are restored automatically."
+            "3. Either type the question numbers you want (e.g., 20-26, 3, 8)\n"
+            "   and click GENERATE CLEAN EXAM,\n"
+            "   or load an Excel file with one column per version and\n"
+            "   click GENERATE ALL PERMUTATIONS.\n\n"
+            "Questions keep the order you give and the formatting of the\n"
+            "source document. Titles starting with * are never copied."
         )
         messagebox.showinfo("Synapse Sorter Help", help_msg)
 
     def load_file(self):
         path = filedialog.askopenfilename(filetypes=[("Word Documents", "*.docx")])
-        if path:
-            self.questions, self.image_dict = process_document(path)
-            self.status.config(text=f"Loaded {len(self.questions)} questions", bootstyle="success")
+        if not path: return
+        try:
+            self.bank = QuestionBank(path)
+        except Exception as e:
+            messagebox.showerror("Could not read document", f"{os.path.basename(path)} could not be read:\n{e}")
+            return
+        text = f"Loaded {len(self.bank)} questions from {os.path.basename(path)}"
+        if self.bank.duplicates:
+            text += f" (numbers used twice: {', '.join(map(str, self.bank.duplicates))})"
+        self.status.config(text=text, bootstyle="warning" if self.bank.duplicates else "success")
+
+    def load_excel(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel Workbooks", "*.xlsx")])
+        if not path: return
+        try:
+            self.permutations = read_permutations(path)
+        except Exception as e:
+            messagebox.showerror("Could not read Excel", f"{os.path.basename(path)} could not be read:\n{e}")
+            return
+        if not self.permutations:
+            messagebox.showwarning("Empty Excel", "No question numbers were found in the first sheet.")
+            return
+        summary = ", ".join(f"{name} ({len(nums)})" for name, nums in self.permutations)
+        self.excel_status.config(text=f"{len(self.permutations)} versions: {summary}", bootstyle="success", wraplength=480)
+
+    def _ready(self):
+        if not self.bank:
+            messagebox.showwarning("No question bank", "Load a question bank first.")
+            return False
+        return True
 
     def generate(self):
-        if not self.questions: return
+        if not self._ready(): return
         nums = parse_number_input(self.range_ent.get())
-        save_path = filedialog.asksaveasfilename(defaultextension=".docx")
+        if not nums:
+            messagebox.showwarning("No questions selected", "Enter question numbers, e.g. 1-5, 8.")
+            return
+        title = self.title_ent.get()
+        save_path = filedialog.asksaveasfilename(defaultextension=".docx", initialfile=safe_filename(title) + ".docx",
+                                                 filetypes=[("Word Documents", "*.docx")])
         if save_path:
-            self.progress["maximum"] = len(nums)
-            self.progress["value"] = 0
-            threading.Thread(target=self.run_task, args=(save_path, self.title_ent.get(), nums), daemon=True).start()
+            self.start([(title, nums, save_path)])
 
-    def run_task(self, path, title, nums):
-        doc = Document()
-        style = doc.styles['Normal']
-        style.font.name = 'Times New Roman'
-        style.font.size = Pt(11)
-        
-        title_p = doc.add_heading(title, level=0)
-        title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        with tempfile.TemporaryDirectory() as tmp:
-            new_num = 1
-            for n in nums:
-                if n in self.questions:
-                    q = self.questions[n]
-                    header_p = doc.add_paragraph()
-                    header_p.paragraph_format.space_before = Pt(12)
-                    header_p.add_run(f"{new_num}. {q['header']}").bold = True
-                    for e in q["elements"]:
-                        if e["type"] == "text":
-                            ans = doc.add_paragraph(normalize_answer_text(e["content"]))
-                            ans.paragraph_format.left_indent = Inches(0.3)
-                        elif e["type"] == "image":
-                            img_name = e["name"]
-                            if img_name in self.image_dict:
-                                img_path = os.path.join(tmp, img_name)
-                                with open(img_path, "wb") as f: f.write(self.image_dict[img_name])
-                                img_p = doc.add_paragraph()
-                                img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                                img_p.add_run().add_picture(img_path, width=Inches(2.5))
-                    new_num += 1
-                self.progress.step(1)
-        doc.save(path)
-        messagebox.showinfo("Success", "Exam Generated!")
+    def generate_permutations(self):
+        if not self._ready(): return
+        if not self.permutations:
+            messagebox.showwarning("No Excel loaded", "Load a permutations Excel first.")
+            return
+        folder = filedialog.askdirectory(title="Choose a folder for the exams")
+        if not folder: return
+        title = self.title_ent.get()
+        jobs = [(f"{title} - {name}", nums, os.path.join(folder, safe_filename(f"{title} - {name}") + ".docx"))
+                for name, nums in self.permutations]
+        existing = [os.path.basename(p) for _, _, p in jobs if os.path.exists(p)]
+        if existing and not messagebox.askyesno("Replace files?", "These files already exist and will be replaced:\n" + "\n".join(existing)):
+            return
+        self.start(jobs)
+
+    def start(self, jobs):
+        for b in self.buttons: b.config(state="disabled")
+        self.progress["maximum"] = sum(len(nums) for _, nums, _ in jobs)
+        self.progress["value"] = 0
+        threading.Thread(target=self.run_task, args=(jobs, self.hide_answers.get()), daemon=True).start()
+        self.root.after(100, self.poll_events)
+
+    def run_task(self, jobs, hide_answers):
+        done = 0
+        results = []
+        try:
+            for title, nums, path in jobs:
+                report = build_exam(self.bank, nums, title, path, hide_answers,
+                                    on_progress=lambda step, base=done: self.events.put(("progress", base + step)))
+                done += len(nums)
+                results.append((path, report))
+            self.events.put(("done", results))
+        except PermissionError as e:
+            self.events.put(("error", f"Could not save {e.filename}.\nIf it is open in Word, close it and try again."))
+        except Exception as e:
+            self.events.put(("error", str(e)))
+
+    def poll_events(self):
+        try:
+            while True:
+                kind, payload = self.events.get_nowait()
+                if kind == "progress":
+                    self.progress["value"] = payload
+                    continue
+                for b in self.buttons: b.config(state="normal")
+                if kind == "error":
+                    messagebox.showerror("Generation failed", payload)
+                else:
+                    self.show_results(payload)
+                return
+        except queue.Empty:
+            self.root.after(100, self.poll_events)
+
+    def show_results(self, results):
+        lines = []
+        for path, report in results:
+            lines.append(os.path.basename(path))
+            details = describe_report(report)
+            if details: lines.append("   " + details.replace("\n", "\n   "))
+        if any(describe_report(r) for _, r in results):
+            messagebox.showwarning("Exam Generated (check notes)", "\n".join(lines))
+        else:
+            messagebox.showinfo("Success", "Exam Generated!\n\n" + "\n".join(lines))
 
 if __name__ == "__main__":
     root_win = tb.Window(themename="flatly")
